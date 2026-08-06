@@ -2,7 +2,7 @@ use leptos::prelude::*;
 use leptos_meta::{Meta, MetaTags, Stylesheet, Title, provide_meta_context};
 
 #[cfg(feature = "hydrate")]
-use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 #[cfg(feature = "hydrate")]
 use bevy::prelude::*;
 #[cfg(feature = "hydrate")]
@@ -19,6 +19,12 @@ use usd_bevy::route::DisplayPurposes;
 use usd_bevy::{UsdPlugin, UsdPrimRef};
 
 const CANVAS_ID: &str = "usd_viewport";
+#[cfg(feature = "hydrate")]
+const MIN_CAMERA_RADIUS: f32 = 0.001;
+#[cfg(feature = "hydrate")]
+const MAX_CAMERA_RADIUS: f32 = 1_000_000.0;
+#[cfg(feature = "hydrate")]
+const CAMERA_FAR: f32 = 10_000_000.0;
 
 #[derive(Clone)]
 #[cfg_attr(feature = "hydrate", derive(Message))]
@@ -633,7 +639,7 @@ pub fn App() -> impl IntoView {
         .collect::<Vec<_>>();
     let (stage_prims, set_stage_prims) = signal(initial_prims);
     let (selected, set_selected) = signal(StagePrimInfo::from(PRIMS[1]));
-    let (auto_orbit, set_auto_orbit) = signal(true);
+    let (auto_orbit, set_auto_orbit) = signal(false);
     let (left_open, set_left_open) = signal(false);
     let (right_open, set_right_open) = signal(false);
     let (stage_name, set_stage_name) = signal("showroom.usda".to_string());
@@ -824,7 +830,13 @@ pub fn App() -> impl IntoView {
                 <section class="viewport-wrap">
                     <div class="viewport-toolbar">
                         <div class="view-mode"><span>"PERSPECTIVE"</span><i></i><span>"MATERIAL"</span></div>
-                        <div class="viewport-hint">"DRAG TO ORBIT"<span>"·"</span>"SCROLL TO ZOOM"</div>
+                        <div class="viewport-hint">
+                            "SPACE/ALT + LMB TUMBLE"
+                            <span>"·"</span>
+                            "MMB TRACK"
+                            <span>"·"</span>
+                            "RMB/WHEEL DOLLY"
+                        </div>
                     </div>
                     {viewport_canvas(command_rx, event_sender)}
                     <div class="axis-gizmo" aria-hidden="true">
@@ -890,7 +902,7 @@ fn init_bevy_app(
                     title: "OpenUSD Web Viewport".into(),
                     canvas: Some(format!("#{CANVAS_ID}")),
                     fit_canvas_to_parent: true,
-                    prevent_default_event_handling: false,
+                    prevent_default_event_handling: true,
                     ..default()
                 }),
                 ..default()
@@ -994,13 +1006,18 @@ fn setup_viewport(
 ) {
     commands.spawn((
         Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            near: MIN_CAMERA_RADIUS,
+            far: CAMERA_FAR,
+            ..default()
+        }),
         Transform::from_xyz(8.5, 6.2, 10.5).looking_at(Vec3::new(0.0, 0.7, 0.0), Vec3::Y),
         OrbitCamera {
             focus: Vec3::new(0.0, 0.7, 0.0),
             radius: 14.8,
             yaw: 0.68,
             pitch: -0.36,
-            auto_orbit: true,
+            auto_orbit: false,
         },
     ));
     commands.spawn((
@@ -1024,9 +1041,11 @@ fn setup_viewport(
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(32.0, 32.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.055, 0.061, 0.068),
-            perceptual_roughness: 0.92,
-            metallic: 0.12,
+            base_color: Color::srgba(0.18, 0.19, 0.20, 0.10),
+            alpha_mode: AlphaMode::Blend,
+            double_sided: true,
+            cull_mode: None,
+            unlit: true,
             ..default()
         })),
         Transform::from_xyz(0.0, -0.02, 0.0),
@@ -1093,7 +1112,6 @@ fn handle_viewer_commands(
                     && let Ok(transform) = transforms.get(entity)
                 {
                     camera.focus = transform.translation();
-                    camera.radius = 6.5;
                 }
             }
             ViewerCommand::LoadUsd { name, files } => {
@@ -1219,7 +1237,7 @@ fn frame_loaded_stage(
     mut request: ResMut<FrameStage>,
     meshes: Res<Assets<Mesh>>,
     geometry: Query<(&Mesh3d, &GlobalTransform), bevy::ecs::query::With<UsdPrimRef>>,
-    mut cameras: Query<&mut OrbitCamera>,
+    mut cameras: Query<(&mut OrbitCamera, &Projection)>,
 ) {
     if !request.0 {
         return;
@@ -1248,12 +1266,22 @@ fn frame_loaded_stage(
         return;
     }
 
-    let Ok(mut camera) = cameras.single_mut() else {
+    let Ok((mut camera, projection)) = cameras.single_mut() else {
         return;
     };
     let size = max - min;
     camera.focus = (min + max) * 0.5;
-    camera.radius = (size.length() * 0.85).max(0.5);
+    let half_fov = match projection {
+        Projection::Perspective(projection) => {
+            let vertical = projection.fov * 0.5;
+            let horizontal = (vertical.tan() * projection.aspect_ratio).atan();
+            vertical.min(horizontal)
+        }
+        _ => std::f32::consts::FRAC_PI_8,
+    };
+    let bounds_radius = size.length() * 0.5;
+    camera.radius =
+        (bounds_radius / half_fov.sin() * 1.12).clamp(MIN_CAMERA_RADIUS, MAX_CAMERA_RADIUS);
     request.0 = false;
 }
 
@@ -1261,8 +1289,10 @@ fn frame_loaded_stage(
 fn orbit_camera(
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mut motion: MessageReader<MouseMotion>,
     mut wheel: MessageReader<MouseWheel>,
+    mut frame_stage: ResMut<FrameStage>,
     mut cameras: Query<(&mut Transform, &mut OrbitCamera)>,
 ) {
     let Ok((mut transform, mut orbit)) = cameras.single_mut() else {
@@ -1271,15 +1301,58 @@ fn orbit_camera(
     let delta = motion
         .read()
         .fold(Vec2::ZERO, |sum, event| sum + event.delta);
-    if mouse.pressed(MouseButton::Left) {
-        orbit.yaw -= delta.x * 0.007;
-        orbit.pitch = (orbit.pitch - delta.y * 0.007).clamp(-1.25, 0.15);
+    let view_modifier = keyboard.pressed(KeyCode::Space)
+        || keyboard.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    let precision = if keyboard.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
+        0.2
+    } else {
+        1.0
+    };
+    let mut navigating = false;
+
+    if view_modifier && mouse.pressed(MouseButton::Left) {
+        orbit.yaw -= delta.x * 0.005 * precision;
+        orbit.pitch = (orbit.pitch - delta.y * 0.005 * precision).clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.001,
+            std::f32::consts::FRAC_PI_2 - 0.001,
+        );
+        navigating = true;
+    } else if view_modifier && mouse.pressed(MouseButton::Middle) {
+        let rotation = Quat::from_euler(EulerRot::YXZ, orbit.yaw, orbit.pitch, 0.0);
+        let right = rotation * Vec3::X;
+        let up = rotation * Vec3::Y;
+        let scale = orbit.radius * 0.0015 * precision;
+        orbit.focus += (-right * delta.x + up * delta.y) * scale;
+        navigating = true;
+    } else if view_modifier && mouse.pressed(MouseButton::Right) {
+        orbit.radius = (orbit.radius * (delta.y * 0.01 * precision).exp())
+            .clamp(MIN_CAMERA_RADIUS, MAX_CAMERA_RADIUS);
+        navigating = true;
+    }
+
+    if view_modifier && keyboard.just_pressed(KeyCode::KeyH) {
+        frame_stage.0 = true;
+        navigating = true;
+    }
+
+    let scroll: f32 = wheel
+        .read()
+        .map(|event| match event.unit {
+            MouseScrollUnit::Line => event.y,
+            MouseScrollUnit::Pixel => event.y / 40.0,
+        })
+        .sum();
+    if scroll != 0.0 {
+        orbit.radius = (orbit.radius * (-scroll * 0.12 * precision).exp())
+            .clamp(MIN_CAMERA_RADIUS, MAX_CAMERA_RADIUS);
+        navigating = true;
+    }
+
+    if navigating {
         orbit.auto_orbit = false;
     } else if orbit.auto_orbit {
         orbit.yaw += time.delta_secs() * 0.12;
     }
-    let scroll: f32 = wheel.read().map(|event| event.y).sum();
-    orbit.radius = (orbit.radius * (1.0 - scroll * 0.08)).clamp(3.2, 28.0);
 
     let rotation = Quat::from_euler(EulerRot::YXZ, orbit.yaw, orbit.pitch, 0.0);
     transform.translation = orbit.focus + rotation * Vec3::new(0.0, 0.0, orbit.radius);
