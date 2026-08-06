@@ -64,8 +64,53 @@ button { color: inherit; }
 .tool-button span { margin-right: 6px; color: var(--accent-hot); font-size: 13px; }
 .file-button { position: relative; display: flex; align-items: center; justify-content: center; cursor: pointer; }
 .file-button input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.dependency-folder-input { display: none; }
 .icon-button { padding: 0 13px; }
 .mobile-only { display: none; }
+
+.dependency-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(6, 8, 10, .76);
+  backdrop-filter: blur(5px);
+}
+.dependency-modal {
+  width: min(540px, 100%);
+  border: 1px solid #3b4043;
+  background: #191c1f;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .55);
+}
+.dependency-modal-heading { padding: 22px 24px 18px; border-bottom: 1px solid var(--line-soft); }
+.dependency-modal-heading h2 { margin: 7px 0 0; font-size: 20px; font-weight: 600; letter-spacing: -.02em; }
+.dependency-modal > p { margin: 0; padding: 18px 24px 12px; color: #aeb2b2; font-size: 12px; line-height: 1.65; }
+.dependency-list {
+  max-height: 190px;
+  margin: 0 24px;
+  padding: 10px 12px 10px 30px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: #121518;
+  color: var(--accent-hot);
+  font: 400 10px/1.7 var(--mono);
+}
+.dependency-modal > .dependency-note { padding-top: 12px; color: #686e70; font: 400 9px/1.6 var(--mono); }
+.dependency-actions { display: flex; justify-content: flex-end; gap: 9px; padding: 8px 24px 22px; }
+.dependency-actions button {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  cursor: pointer;
+  font: 500 8px/1 var(--mono);
+  letter-spacing: .1em;
+}
+.dependency-secondary { background: transparent; color: #7e8486; }
+.dependency-secondary:hover { color: var(--ink); background: #222629; }
+.dependency-primary { border-color: var(--accent) !important; background: var(--accent); color: #fff; }
+.dependency-primary:hover { background: var(--accent-hot); }
 
 .workspace { display: grid; grid-template-columns: 264px minmax(0, 1fr) 292px; min-height: 0; }
 .panel { min-height: 0; background: var(--panel); display: flex; flex-direction: column; z-index: 12; }

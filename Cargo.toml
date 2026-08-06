@@ -41,11 +41,13 @@ bevy = { version = "0.19", optional = true, default-features = false, features =
     "zstd_rust",
 ] }
 gloo-file = { version = "0.3", features = ["futures"], optional = true }
+js-sys = { version = "0.3", optional = true }
 leptos-bevy-canvas = { version = "0.6", optional = true }
 openusd = { git = "https://github.com/mxpv/openusd", features = ["geom", "shade"], optional = true }
 usd_bevy = { path = "../bevy_openusd/crates/usd_bevy", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
-web-sys = { version = "0.3", features = ["FileList", "HtmlInputElement"], optional = true }
+web-sys = { version = "0.3", features = ["Document", "Element", "FileList", "HtmlElement", "HtmlInputElement", "Window"], optional = true }
+zip = { version = "8.6", default-features = false, optional = true }
 
 [features]
 hydrate = [
@@ -53,12 +55,14 @@ hydrate = [
     "dep:bevy",
     "dep:console_error_panic_hook",
     "dep:gloo-file",
+    "dep:js-sys",
     "dep:leptos-bevy-canvas",
     "dep:openusd",
     "dep:usd_bevy",
     "dep:wasm-bindgen",
     "dep:wasm-bindgen-futures",
     "dep:web-sys",
+    "dep:zip",
 ]
 ssr = [
     "leptos/ssr",

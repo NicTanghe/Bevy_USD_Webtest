@@ -28,8 +28,20 @@ enum ViewerCommand {
     FocusPrim(String),
     LoadUsd {
         name: String,
-        bytes: std::sync::Arc<Vec<u8>>,
+        files: std::sync::Arc<Vec<BrowserFile>>,
     },
+}
+
+#[derive(Clone)]
+struct BrowserFile {
+    path: String,
+    bytes: std::sync::Arc<Vec<u8>>,
+}
+
+#[derive(Clone)]
+struct BrowserSceneFiles {
+    root: String,
+    files: Vec<BrowserFile>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -49,6 +61,7 @@ enum ViewerEvent {
         prims: Vec<StagePrimInfo>,
         mesh_count: usize,
         warning: Option<String>,
+        missing_dependencies: Vec<String>,
     },
     StageLoadFailed {
         name: String,
@@ -72,7 +85,7 @@ struct SceneStyled;
 
 #[cfg(feature = "hydrate")]
 #[derive(Resource, Default)]
-struct PendingStage(Option<(String, std::sync::Arc<Vec<u8>>)>);
+struct PendingStage(Option<(String, std::sync::Arc<Vec<BrowserFile>>)>);
 
 #[cfg(feature = "hydrate")]
 #[derive(Resource, Default)]
@@ -221,14 +234,66 @@ fn viewport_canvas(_receiver: CanvasReceiver, _event_sender: CanvasEventSender) 
 
 #[cfg(feature = "hydrate")]
 struct BrowserFileResolver {
-    name: String,
-    bytes: std::sync::Arc<Vec<u8>>,
+    files: std::sync::Arc<Vec<BrowserFile>>,
 }
 
 #[cfg(feature = "hydrate")]
 impl BrowserFileResolver {
-    fn matches(&self, path: &str) -> bool {
-        std::path::Path::new(path).file_name() == std::path::Path::new(&self.name).file_name()
+    fn file(&self, path: &str) -> Option<&BrowserFile> {
+        let normalized = normalize_browser_path(path);
+        if let Some(file) = self.files.iter().find(|file| file.path == normalized) {
+            return Some(file);
+        }
+
+        // Directory selection includes the selected folder's own name. Match
+        // the authored path against the end of that browser-relative path so
+        // either a project root or a narrower dependency folder can be granted.
+        let suffix = format!("/{normalized}");
+        let mut matches = self
+            .files
+            .iter()
+            .filter(|file| file.path.ends_with(&suffix));
+        let file = matches.next();
+        if let Some(file) = file
+            && matches.next().is_none()
+        {
+            return Some(file);
+        }
+
+        // Some browsers do not expose a directory-relative path. Fall back to
+        // the basename only when it identifies exactly one granted file.
+        let name = std::path::Path::new(&normalized).file_name()?;
+        let mut matches = self
+            .files
+            .iter()
+            .filter(|file| std::path::Path::new(&file.path).file_name() == Some(name));
+        let file = matches.next()?;
+        matches.next().is_none().then_some(file)
+    }
+}
+
+#[cfg(feature = "hydrate")]
+fn normalize_browser_path(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    parts.join("/")
+}
+
+#[cfg(feature = "hydrate")]
+fn join_browser_path(directory: &str, path: &str) -> String {
+    if directory.is_empty() {
+        normalize_browser_path(path)
+    } else {
+        normalize_browser_path(&format!("{directory}/{path}"))
     }
 }
 
@@ -237,18 +302,50 @@ impl openusd::ar::Resolver for BrowserFileResolver {
     fn create_identifier(
         &self,
         asset_path: &str,
-        _anchor: Option<&openusd::ar::ResolvedPath>,
+        anchor: Option<&openusd::ar::ResolvedPath>,
     ) -> String {
-        if self.matches(asset_path) {
-            self.name.clone()
-        } else {
-            asset_path.replace('\\', "/")
+        if asset_path.is_empty() {
+            return String::new();
         }
+        if openusd::ar::is_package_relative_path(asset_path)
+            && let Some((package, inner)) =
+                openusd::ar::split_package_relative_path_outer(asset_path)
+        {
+            let package = self.create_identifier(&package, anchor);
+            return openusd::ar::join_package_relative_path(&package, &inner);
+        }
+        if let Some(anchor) = anchor {
+            let anchor = anchor.to_string();
+            if openusd::ar::is_package_relative_path(&anchor)
+                && let Some((package, inner)) =
+                    openusd::ar::split_package_relative_path_inner(&anchor)
+            {
+                let directory = inner
+                    .rsplit_once('/')
+                    .map_or("", |(directory, _)| directory);
+                let inner = join_browser_path(directory, asset_path);
+                return openusd::ar::join_package_relative_path(&package, &inner);
+            }
+            let directory = anchor
+                .rsplit_once('/')
+                .map_or("", |(directory, _)| directory);
+            return join_browser_path(directory, asset_path);
+        }
+        normalize_browser_path(asset_path)
     }
 
     fn resolve(&self, asset_path: &str) -> Option<openusd::ar::ResolvedPath> {
-        self.matches(asset_path)
-            .then(|| openusd::ar::ResolvedPath::new(&self.name))
+        if openusd::ar::is_package_relative_path(asset_path) {
+            let (package, _) = openusd::ar::split_package_relative_path_outer(asset_path)?;
+            self.file(&package)
+                .map(|_| openusd::ar::ResolvedPath::new(asset_path))
+        } else {
+            // Preserve the authored identifier as the resolved path. This keeps
+            // later relative references anchored correctly even when the file
+            // was found through the unique-basename fallback above.
+            self.file(asset_path)
+                .map(|_| openusd::ar::ResolvedPath::new(normalize_browser_path(asset_path)))
+        }
     }
 
     fn resolve_for_new_asset(&self, asset_path: &str) -> Option<openusd::ar::ResolvedPath> {
@@ -259,25 +356,88 @@ impl openusd::ar::Resolver for BrowserFileResolver {
         &self,
         resolved_path: &openusd::ar::ResolvedPath,
     ) -> std::io::Result<Box<dyn openusd::ar::Asset>> {
-        if !self.matches(&resolved_path.to_string()) {
-            return Err(std::io::Error::new(
+        let resolved = resolved_path.to_string();
+        if let Some((package, inner)) = openusd::ar::split_package_relative_path_outer(&resolved) {
+            use std::io::Read;
+
+            let file = self.file(&package).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("package is not available in the browser: {package}"),
+                )
+            })?;
+            let cursor = std::io::Cursor::new((*file.bytes).clone());
+            let mut archive = zip::ZipArchive::new(cursor).map_err(std::io::Error::other)?;
+            let mut entry = archive.by_name(&inner).map_err(std::io::Error::other)?;
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            return Ok(Box::new(std::io::Cursor::new(bytes)));
+        }
+
+        let file = self.file(&resolved).ok_or_else(|| {
+            std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("asset is not available in the browser: {resolved_path}"),
-            ));
-        }
-        Ok(Box::new(std::io::Cursor::new((*self.bytes).clone())))
+            )
+        })?;
+        Ok(Box::new(std::io::Cursor::new((*file.bytes).clone())))
     }
 
     fn identity(&self) -> String {
-        format!("browser:{}:{}", self.name, self.bytes.len())
+        let files = self
+            .files
+            .iter()
+            .map(|file| format!("{}:{}", file.path, file.bytes.len()))
+            .collect::<Vec<_>>()
+            .join("|");
+        format!("browser:{files}")
     }
 }
+
+#[cfg(feature = "hydrate")]
+fn webkit_relative_path(file: &web_sys::File) -> String {
+    js_sys::Reflect::get(
+        file.as_ref(),
+        &wasm_bindgen::JsValue::from_str("webkitRelativePath"),
+    )
+    .ok()
+    .and_then(|path| path.as_string())
+    .unwrap_or_default()
+}
+
+#[cfg(feature = "hydrate")]
+fn send_browser_scene(bridge: &ViewerBridge, scene: &BrowserSceneFiles) {
+    bridge.send(ViewerCommand::LoadUsd {
+        name: scene.root.clone(),
+        files: std::sync::Arc::new(scene.files.clone()),
+    });
+}
+
+#[cfg(feature = "hydrate")]
+fn request_dependency_folder() {
+    use wasm_bindgen::JsCast;
+
+    let Some(input) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id("usd_dependency_folder"))
+        .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
+    else {
+        return;
+    };
+    input.click();
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn request_dependency_folder() {}
 
 #[cfg(feature = "hydrate")]
 fn load_selected_file(
     event: leptos::ev::Event,
     bridge: ViewerBridge,
     set_stage_name: WriteSignal<String>,
+    set_stage_status: WriteSignal<String>,
+    set_scene_files: WriteSignal<Option<BrowserSceneFiles>>,
+    set_missing_dependencies: WriteSignal<Vec<String>>,
 ) {
     use wasm_bindgen::JsCast;
 
@@ -290,19 +450,98 @@ fn load_selected_file(
     let Some(file) = input.files().and_then(|files| files.get(0)) else {
         return;
     };
+    input.set_value("");
 
     let name = file.name();
+    set_stage_name.set(name.clone());
+    set_stage_status.set("LOADING STAGE…".to_string());
+    set_missing_dependencies.set(Vec::new());
     wasm_bindgen_futures::spawn_local(async move {
         match gloo_file::futures::read_as_bytes(&gloo_file::File::from(file)).await {
             Ok(bytes) => {
-                set_stage_name.set(name.clone());
-                bridge.send(ViewerCommand::LoadUsd {
-                    name,
-                    bytes: std::sync::Arc::new(bytes),
-                });
+                let scene = BrowserSceneFiles {
+                    root: name.clone(),
+                    files: vec![BrowserFile {
+                        path: name,
+                        bytes: std::sync::Arc::new(bytes),
+                    }],
+                };
+                set_scene_files.set(Some(scene.clone()));
+                send_browser_scene(&bridge, &scene);
             }
-            Err(error) => leptos::logging::error!("Could not read the selected USD file: {error}"),
+            Err(error) => {
+                let message = format!("Could not read the selected USD file: {error}");
+                leptos::logging::error!("{message}");
+                set_stage_status.set(format!("LOAD FAILED: {message}"));
+            }
         }
+    });
+}
+
+#[cfg(feature = "hydrate")]
+fn load_dependency_folder(
+    event: leptos::ev::Event,
+    bridge: ViewerBridge,
+    scene_files: ReadSignal<Option<BrowserSceneFiles>>,
+    set_scene_files: WriteSignal<Option<BrowserSceneFiles>>,
+    set_stage_status: WriteSignal<String>,
+) {
+    use wasm_bindgen::JsCast;
+
+    let Some(input) = event
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
+    else {
+        return;
+    };
+    let Some(file_list) = input.files() else {
+        return;
+    };
+    let selected = (0..file_list.length())
+        .filter_map(|index| file_list.get(index))
+        .map(|file| {
+            let path = webkit_relative_path(&file);
+            let path = if path.is_empty() { file.name() } else { path };
+            (file, normalize_browser_path(&path))
+        })
+        .collect::<Vec<_>>();
+    input.set_value("");
+    let Some(mut scene) = scene_files.get_untracked() else {
+        return;
+    };
+    if selected.is_empty() {
+        set_stage_status.set("NO FILES FOUND IN GRANTED FOLDER".to_string());
+        return;
+    }
+
+    set_stage_status.set("READING DEPENDENCIES…".to_string());
+    wasm_bindgen_futures::spawn_local(async move {
+        for (file, path) in selected {
+            let bytes = match gloo_file::futures::read_as_bytes(&gloo_file::File::from(file)).await
+            {
+                Ok(bytes) => std::sync::Arc::new(bytes),
+                Err(error) => {
+                    let message = format!("Could not read dependency {path}: {error}");
+                    leptos::logging::error!("{message}");
+                    set_stage_status.set(format!("LOAD FAILED: {message}"));
+                    return;
+                }
+            };
+
+            // The explicitly selected root always wins over a same-named file
+            // encountered while granting a directory.
+            if path == scene.root {
+                continue;
+            }
+            if let Some(existing) = scene.files.iter_mut().find(|file| file.path == path) {
+                existing.bytes = bytes;
+            } else {
+                scene.files.push(BrowserFile { path, bytes });
+            }
+        }
+        set_scene_files.set(Some(scene.clone()));
+        set_stage_status.set("RECOMPOSING STAGE…".to_string());
+        send_browser_scene(&bridge, &scene);
     });
 }
 
@@ -311,6 +550,19 @@ fn load_selected_file(
     _event: leptos::ev::Event,
     _bridge: ViewerBridge,
     _set_stage_name: WriteSignal<String>,
+    _set_stage_status: WriteSignal<String>,
+    _set_scene_files: WriteSignal<Option<BrowserSceneFiles>>,
+    _set_missing_dependencies: WriteSignal<Vec<String>>,
+) {
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn load_dependency_folder(
+    _event: leptos::ev::Event,
+    _bridge: ViewerBridge,
+    _scene_files: ReadSignal<Option<BrowserSceneFiles>>,
+    _set_scene_files: WriteSignal<Option<BrowserSceneFiles>>,
+    _set_stage_status: WriteSignal<String>,
 ) {
 }
 
@@ -322,6 +574,7 @@ fn install_stage_feedback(
     set_selected: WriteSignal<StagePrimInfo>,
     set_mesh_count: WriteSignal<usize>,
     set_stage_status: WriteSignal<String>,
+    set_missing_dependencies: WriteSignal<Vec<String>>,
 ) {
     Effect::new(move |_| {
         let Some(event) = receiver.get() else {
@@ -333,6 +586,7 @@ fn install_stage_feedback(
                 prims,
                 mesh_count,
                 warning,
+                missing_dependencies,
             } => {
                 if let Some(first) = prims
                     .iter()
@@ -346,10 +600,12 @@ fn install_stage_feedback(
                 set_mesh_count.set(mesh_count);
                 set_stage_status.set(warning.unwrap_or_else(|| "STAGE READY".to_string()));
                 set_stage_prims.set(prims);
+                set_missing_dependencies.set(missing_dependencies);
             }
             ViewerEvent::StageLoadFailed { name, error } => {
                 set_stage_name.set(name);
                 set_stage_status.set(format!("LOAD FAILED: {error}"));
+                set_missing_dependencies.set(Vec::new());
             }
         }
     });
@@ -363,6 +619,7 @@ fn install_stage_feedback(
     _set_selected: WriteSignal<StagePrimInfo>,
     _set_mesh_count: WriteSignal<usize>,
     _set_stage_status: WriteSignal<String>,
+    _set_missing_dependencies: WriteSignal<Vec<String>>,
 ) {
 }
 
@@ -382,6 +639,8 @@ pub fn App() -> impl IntoView {
     let (stage_name, set_stage_name) = signal("showroom.usda".to_string());
     let (mesh_count, set_mesh_count) = signal(6usize);
     let (stage_status, set_stage_status) = signal("STAGE READY".to_string());
+    let (scene_files, set_scene_files) = signal(None::<BrowserSceneFiles>);
+    let (missing_dependencies, set_missing_dependencies) = signal(Vec::<String>::new());
 
     install_stage_feedback(
         stage_events,
@@ -390,11 +649,15 @@ pub fn App() -> impl IntoView {
         set_selected,
         set_mesh_count,
         set_stage_status,
+        set_missing_dependencies,
     );
 
     let select_bridge = bridge.clone();
     let orbit_bridge = bridge.clone();
     let file_bridge = bridge.clone();
+    let dependency_bridge = bridge.clone();
+    let folder_picker_attribute =
+        leptos::tachys::html::attribute::custom::custom_attribute("webkitdirectory", "");
     let toggle_orbit = move |_| {
         let next = !auto_orbit.get_untracked();
         set_auto_orbit.set(next);
@@ -429,7 +692,14 @@ pub fn App() -> impl IntoView {
                             type="file"
                             accept=".usd,.usda,.usdc,.usdz"
                             on:change=move |event| {
-                                load_selected_file(event, file_bridge.clone(), set_stage_name)
+                                load_selected_file(
+                                    event,
+                                    file_bridge.clone(),
+                                    set_stage_name,
+                                    set_stage_status,
+                                    set_scene_files,
+                                    set_missing_dependencies,
+                                )
                             }
                         />
                     </label>
@@ -452,6 +722,62 @@ pub fn App() -> impl IntoView {
                     >"INFO"</button>
                 </div>
             </header>
+
+            <input
+                {..folder_picker_attribute}
+                id="usd_dependency_folder"
+                class="dependency-folder-input"
+                type="file"
+                multiple
+                on:change=move |event| {
+                    load_dependency_folder(
+                        event,
+                        dependency_bridge.clone(),
+                        scene_files,
+                        set_scene_files,
+                        set_stage_status,
+                    )
+                }
+            />
+
+            <Show when=move || !missing_dependencies.get().is_empty()>
+                <div class="dependency-modal-backdrop">
+                    <section
+                        class="dependency-modal"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="dependency-title"
+                    >
+                        <div class="dependency-modal-heading">
+                            <span class="eyebrow">"USD COMPOSITION"</span>
+                            <h2 id="dependency-title">"Referenced files need access"</h2>
+                        </div>
+                        <p>
+                            "The selected file remains the root stage. Grant access to the folder containing these referenced USD files:"
+                        </p>
+                        <ul class="dependency-list">
+                            {move || missing_dependencies.get().into_iter().map(|path| {
+                                view! { <li>{path}</li> }
+                            }).collect_view()}
+                        </ul>
+                        <p class="dependency-note">
+                            "The folder is read only for this session. If another reference is outside it, you will be asked again."
+                        </p>
+                        <div class="dependency-actions">
+                            <button
+                                type="button"
+                                class="dependency-secondary"
+                                on:click=move |_| set_missing_dependencies.set(Vec::new())
+                            >"NOT NOW"</button>
+                            <button
+                                type="button"
+                                class="dependency-primary"
+                                on:click=move |_| request_dependency_folder()
+                            >"GRANT FOLDER ACCESS"</button>
+                        </div>
+                    </section>
+                </div>
+            </Show>
 
             <section class="workspace">
                 <aside class:open=move || left_open.get() class="panel outliner">
@@ -770,8 +1096,8 @@ fn handle_viewer_commands(
                     camera.radius = 6.5;
                 }
             }
-            ViewerCommand::LoadUsd { name, bytes } => {
-                pending_stage.0 = Some((name.clone(), bytes.clone()));
+            ViewerCommand::LoadUsd { name, files } => {
+                pending_stage.0 = Some((name.clone(), files.clone()));
             }
         }
     }
@@ -780,14 +1106,11 @@ fn handle_viewer_commands(
 #[cfg(feature = "hydrate")]
 fn apply_pending_stage(world: &mut World) {
     let pending = world.resource_mut::<PendingStage>().0.take();
-    let Some((name, bytes)) = pending else {
+    let Some((name, files)) = pending else {
         return;
     };
 
-    let resolver = BrowserFileResolver {
-        name: name.clone(),
-        bytes,
-    };
+    let resolver = BrowserFileResolver { files };
     let stage = match Stage::builder().resolver(resolver).open(&name) {
         Ok(stage) => stage,
         Err(error) => {
@@ -806,6 +1129,18 @@ fn apply_pending_stage(world: &mut World) {
             "Stage {name} loaded with unresolved composition dependencies: {composition_errors:#?}"
         );
     }
+    let mut missing_dependencies = composition_errors
+        .iter()
+        .filter_map(|error| match error {
+            openusd::pcp::Error::UnresolvedLayer { asset_path, .. }
+            | openusd::pcp::Error::UnresolvedSublayer { asset_path, .. } => {
+                Some(asset_path.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    missing_dependencies.sort();
+    missing_dependencies.dedup();
     let mut prim_count = 0usize;
     let mut mesh_count = 0usize;
     let mut prims = Vec::new();
@@ -816,6 +1151,7 @@ fn apply_pending_stage(world: &mut World) {
             .type_name()
             .ok()
             .flatten()
+            .map(|kind| kind.to_string())
             .unwrap_or_else(|| "Prim".to_string());
         if kind == "Mesh" {
             mesh_count += 1;
@@ -858,7 +1194,11 @@ fn apply_pending_stage(world: &mut World) {
         .map(|(_, entity)| entity)
         .collect::<Vec<_>>();
     for entity in entities {
-        world.despawn(entity);
+        // Despawning a parent recursively removes its children. The bimap also
+        // contains those child IDs, so check each one before touching it again.
+        if world.get_entity(entity).is_ok() {
+            world.despawn(entity);
+        }
     }
     *world.resource_mut::<PrimEntities>() = PrimEntities::default();
     world.remove_non_send::<LiveStage>();
@@ -869,6 +1209,7 @@ fn apply_pending_stage(world: &mut World) {
         prims,
         mesh_count,
         warning,
+        missing_dependencies,
     });
     bevy::log::info!("Loaded USD stage {name}");
 }
