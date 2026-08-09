@@ -4,6 +4,8 @@ use leptos_meta::{Meta, MetaTags, Stylesheet, Title, provide_meta_context};
 #[cfg(feature = "hydrate")]
 use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 #[cfg(feature = "hydrate")]
+use bevy::light::NotShadowCaster;
+#[cfg(feature = "hydrate")]
 use bevy::prelude::*;
 #[cfg(feature = "hydrate")]
 use leptos_bevy_canvas::prelude::*;
@@ -32,6 +34,10 @@ enum ViewerCommand {
     ResetCamera,
     SetAutoOrbit(bool),
     FocusPrim(String),
+    SetPrimVisibility {
+        path: String,
+        visible: bool,
+    },
     LoadUsd {
         name: String,
         files: std::sync::Arc<Vec<BrowserFile>>,
@@ -57,6 +63,35 @@ struct StagePrimInfo {
     kind: String,
     position: String,
     color: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "hydrate", derive(Message))]
+struct AxisGizmoState {
+    axes: [[f32; 3]; 3],
+}
+
+impl Default for AxisGizmoState {
+    fn default() -> Self {
+        Self {
+            axes: [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]],
+        }
+    }
+}
+
+fn prim_path_depth(path: &str) -> usize {
+    path.split('/').filter(|part| !part.is_empty()).count()
+}
+
+fn is_descendant_path(path: &str, ancestor: &str) -> bool {
+    path.strip_prefix(ancestor)
+        .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn matches_prim_filter(prim: &StagePrimInfo, filter: &str) -> bool {
+    prim.name.to_lowercase().contains(filter)
+        || prim.path.to_lowercase().contains(filter)
+        || prim.kind.to_lowercase().contains(filter)
 }
 
 #[derive(Clone)]
@@ -180,6 +215,12 @@ type StageEventReceiver = LeptosMessageReceiver<ViewerEvent>;
 #[cfg(feature = "hydrate")]
 type CanvasEventSender = BevyMessageSender<ViewerEvent>;
 
+#[cfg(feature = "hydrate")]
+type CameraEventReceiver = LeptosMessageReceiver<AxisGizmoState>;
+
+#[cfg(feature = "hydrate")]
+type CameraEventSender = BevyMessageSender<AxisGizmoState>;
+
 #[cfg(not(feature = "hydrate"))]
 struct CanvasReceiver;
 
@@ -189,16 +230,32 @@ struct StageEventReceiver;
 #[cfg(not(feature = "hydrate"))]
 struct CanvasEventSender;
 
+#[cfg(not(feature = "hydrate"))]
+struct CameraEventReceiver;
+
+#[cfg(not(feature = "hydrate"))]
+struct CameraEventSender;
+
 #[cfg(feature = "hydrate")]
 fn viewer_bridge() -> (
     ViewerBridge,
     CanvasReceiver,
     StageEventReceiver,
     CanvasEventSender,
+    CameraEventReceiver,
+    CameraEventSender,
 ) {
     let (sender, receiver) = message_l2b::<ViewerCommand>();
     let (event_receiver, event_sender) = message_b2l::<ViewerEvent>();
-    (ViewerBridge(sender), receiver, event_receiver, event_sender)
+    let (camera_receiver, camera_sender) = message_b2l::<AxisGizmoState>();
+    (
+        ViewerBridge(sender),
+        receiver,
+        event_receiver,
+        event_sender,
+        camera_receiver,
+        camera_sender,
+    )
 }
 
 #[cfg(not(feature = "hydrate"))]
@@ -207,12 +264,16 @@ fn viewer_bridge() -> (
     CanvasReceiver,
     StageEventReceiver,
     CanvasEventSender,
+    CameraEventReceiver,
+    CameraEventSender,
 ) {
     (
         ViewerBridge,
         CanvasReceiver,
         StageEventReceiver,
         CanvasEventSender,
+        CameraEventReceiver,
+        CameraEventSender,
     )
 }
 
@@ -229,12 +290,20 @@ impl ViewerBridge {
 }
 
 #[cfg(feature = "hydrate")]
-fn viewport_canvas(receiver: CanvasReceiver, event_sender: CanvasEventSender) -> impl IntoView {
-    view! { <BevyCanvas init=move || init_bevy_app(receiver, event_sender) canvas_id=CANVAS_ID /> }
+fn viewport_canvas(
+    receiver: CanvasReceiver,
+    event_sender: CanvasEventSender,
+    camera_sender: CameraEventSender,
+) -> impl IntoView {
+    view! { <BevyCanvas init=move || init_bevy_app(receiver, event_sender, camera_sender) canvas_id=CANVAS_ID /> }
 }
 
 #[cfg(not(feature = "hydrate"))]
-fn viewport_canvas(_receiver: CanvasReceiver, _event_sender: CanvasEventSender) -> impl IntoView {
+fn viewport_canvas(
+    _receiver: CanvasReceiver,
+    _event_sender: CanvasEventSender,
+    _camera_sender: CameraEventSender,
+) -> impl IntoView {
     view! { <canvas id=CANVAS_ID></canvas> }
 }
 
@@ -629,10 +698,85 @@ fn install_stage_feedback(
 ) {
 }
 
+#[cfg(feature = "hydrate")]
+fn install_camera_feedback(
+    receiver: CameraEventReceiver,
+    set_axis_gizmo: WriteSignal<AxisGizmoState>,
+) {
+    Effect::new(move |_| {
+        if let Some(orientation) = receiver.get() {
+            set_axis_gizmo.set(orientation);
+        }
+    });
+}
+
+#[cfg(not(feature = "hydrate"))]
+fn install_camera_feedback(
+    _receiver: CameraEventReceiver,
+    _set_axis_gizmo: WriteSignal<AxisGizmoState>,
+) {
+}
+
+fn axis_gizmo_view(axis_gizmo: ReadSignal<AxisGizmoState>) -> impl IntoView {
+    let coordinate = move |axis: usize, component: usize, radius: f32| {
+        32.0 + axis_gizmo.get().axes[axis][component] * radius
+    };
+    let opacity = move |axis: usize| {
+        let depth = axis_gizmo.get().axes[axis][2];
+        0.48 + (depth + 1.0) * 0.24
+    };
+
+    view! {
+        <svg class="axis-gizmo" viewBox="0 0 64 64" aria-hidden="true">
+            <line
+                class="axis-line axis-x"
+                x1="32" y1="32"
+                x2=move || coordinate(0, 0, 22.0)
+                y2=move || coordinate(0, 1, 22.0)
+                opacity=move || opacity(0)
+            />
+            <line
+                class="axis-line axis-y"
+                x1="32" y1="32"
+                x2=move || coordinate(1, 0, 22.0)
+                y2=move || coordinate(1, 1, 22.0)
+                opacity=move || opacity(1)
+            />
+            <line
+                class="axis-line axis-z"
+                x1="32" y1="32"
+                x2=move || coordinate(2, 0, 22.0)
+                y2=move || coordinate(2, 1, 22.0)
+                opacity=move || opacity(2)
+            />
+            <circle class="axis-origin" cx="32" cy="32" r="2"/>
+            <text
+                class="axis-label axis-x"
+                x=move || coordinate(0, 0, 27.0)
+                y=move || coordinate(0, 1, 27.0)
+                opacity=move || opacity(0)
+            >"X"</text>
+            <text
+                class="axis-label axis-y"
+                x=move || coordinate(1, 0, 27.0)
+                y=move || coordinate(1, 1, 27.0)
+                opacity=move || opacity(1)
+            >"Y"</text>
+            <text
+                class="axis-label axis-z"
+                x=move || coordinate(2, 0, 27.0)
+                y=move || coordinate(2, 1, 27.0)
+                opacity=move || opacity(2)
+            >"Z"</text>
+        </svg>
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
-    let (bridge, command_rx, stage_events, event_sender) = viewer_bridge();
+    let (bridge, command_rx, stage_events, event_sender, camera_events, camera_sender) =
+        viewer_bridge();
     let initial_prims = PRIMS
         .into_iter()
         .map(StagePrimInfo::from)
@@ -647,6 +791,10 @@ pub fn App() -> impl IntoView {
     let (stage_status, set_stage_status) = signal("STAGE READY".to_string());
     let (scene_files, set_scene_files) = signal(None::<BrowserSceneFiles>);
     let (missing_dependencies, set_missing_dependencies) = signal(Vec::<String>::new());
+    let (axis_gizmo, set_axis_gizmo) = signal(AxisGizmoState::default());
+    let (outliner_filter, set_outliner_filter) = signal(String::new());
+    let (collapsed_prims, set_collapsed_prims) = signal(std::collections::HashSet::<String>::new());
+    let (hidden_prims, set_hidden_prims) = signal(std::collections::HashSet::<String>::new());
 
     install_stage_feedback(
         stage_events,
@@ -657,6 +805,13 @@ pub fn App() -> impl IntoView {
         set_stage_status,
         set_missing_dependencies,
     );
+    install_camera_feedback(camera_events, set_axis_gizmo);
+    Effect::new(move |_| {
+        stage_name.track();
+        set_outliner_filter.set(String::new());
+        set_collapsed_prims.set(std::collections::HashSet::new());
+        set_hidden_prims.set(std::collections::HashSet::new());
+    });
 
     let select_bridge = bridge.clone();
     let orbit_bridge = bridge.clone();
@@ -787,44 +942,133 @@ pub fn App() -> impl IntoView {
 
             <section class="workspace">
                 <aside class:open=move || left_open.get() class="panel outliner">
-                    <div class="panel-heading">
-                        <div><span class="eyebrow">"STAGE"</span><h2>"Outliner"</h2></div>
-                        <span class="count">{move || format!("{} PRIMS", stage_prims.get().len())}</span>
+                    <div class="outliner-titlebar">
+                        <span class="scene-caret" aria-hidden="true">"⌄"</span>
+                        <span class="scene-folder" aria-hidden="true"></span>
+                        <strong>"SCENE"</strong>
                     </div>
-                    <label class="search">
+                    <label class="outliner-search">
                         <span aria-hidden="true">"⌕"</span>
-                        <input type="search" placeholder="Filter stage…" aria-label="Filter stage" />
-                        <kbd>"/"</kbd>
+                        <input
+                            type="search"
+                            placeholder="filter by name / path…"
+                            aria-label="Filter scene"
+                            prop:value=move || outliner_filter.get()
+                            on:input=move |event| set_outliner_filter.set(event_target_value(&event))
+                        />
                     </label>
-                    <nav class="tree" aria-label="Stage prims">
-                        {move || stage_prims.get().into_iter().map(|prim| {
+                    <nav class="tree" role="tree" aria-label="Stage prims">
+                        {move || {
+                            let prims = stage_prims.get();
+                            let collapsed = collapsed_prims.get();
+                            let hidden = hidden_prims.get();
+                            let filter = outliner_filter.get().trim().to_lowercase();
+                            let base_depth = prims
+                                .iter()
+                                .map(|prim| prim_path_depth(&prim.path))
+                                .min()
+                                .unwrap_or(1);
+
+                            prims.iter().filter(|prim| {
+                                let hidden_by_parent = filter.is_empty()
+                                    && collapsed
+                                        .iter()
+                                        .any(|parent| is_descendant_path(&prim.path, parent));
+                                if hidden_by_parent {
+                                    return false;
+                                }
+                                filter.is_empty()
+                                    || matches_prim_filter(prim, &filter)
+                                    || prims.iter().any(|candidate| {
+                                        is_descendant_path(&candidate.path, &prim.path)
+                                            && matches_prim_filter(candidate, &filter)
+                                    })
+                            }).cloned().map(|prim| {
+                            let has_children = prims
+                                .iter()
+                                .any(|candidate| is_descendant_path(&candidate.path, &prim.path));
+                            let depth = prim_path_depth(&prim.path).saturating_sub(base_depth);
+                            let is_collapsed = collapsed.contains(&prim.path);
+                            let is_hidden = hidden.contains(&prim.path);
                             let prim_bridge = select_bridge.clone();
+                            let visibility_bridge = select_bridge.clone();
                             let selected_path = prim.path.clone();
                             let focus_path = prim.path.clone();
+                            let collapse_path = prim.path.clone();
+                            let visibility_path = prim.path.clone();
                             let click_prim = prim.clone();
-                            let icon_class = if prim.kind == "Mesh" { "prim-icon mesh" } else { "prim-icon xform" };
+                            let icon_class = if prim.kind == "Mesh" {
+                                "prim-cube mesh"
+                            } else {
+                                "prim-cube"
+                            };
                             view! {
-                                <button
-                                    type="button"
-                                    class="tree-row child-row"
+                                <div
+                                    class="tree-row"
                                     class:selected=move || selected.get().path == selected_path
-                                    on:click=move |_| {
-                                        set_selected.set(click_prim.clone());
-                                        prim_bridge.send(ViewerCommand::FocusPrim(focus_path.clone()));
-                                    }
+                                    class:muted=is_hidden
+                                    role="treeitem"
+                                    attr:aria-level=(depth + 1).to_string()
+                                    attr:aria-expanded=has_children.then(|| (!is_collapsed).to_string())
+                                    style=format!("--tree-indent: {}px", depth * 13)
                                 >
-                                    <span class="branch-line"></span>
+                                    <button
+                                        type="button"
+                                        class="tree-disclosure"
+                                        class:empty=!has_children
+                                        aria-label=if is_collapsed { "Expand prim" } else { "Collapse prim" }
+                                        on:click=move |_| {
+                                            if has_children {
+                                                let mut paths = collapsed_prims.get_untracked();
+                                                if !paths.insert(collapse_path.clone()) {
+                                                    paths.remove(&collapse_path);
+                                                }
+                                                set_collapsed_prims.set(paths);
+                                            }
+                                        }
+                                    >
+                                        {if is_collapsed { "›" } else { "⌄" }}
+                                    </button>
                                     <span class=icon_class></span>
-                                    <span>{prim.name}</span>
-                                    <small>{prim.kind}</small>
-                                </button>
+                                    <button
+                                        type="button"
+                                        class="tree-select"
+                                        on:click=move |_| {
+                                            set_selected.set(click_prim.clone());
+                                            prim_bridge.send(ViewerCommand::FocusPrim(focus_path.clone()));
+                                        }
+                                    >
+                                        <span>{prim.name}</span>
+                                        <small>{prim.kind}</small>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="tree-visibility"
+                                        class:hidden=is_hidden
+                                        aria-label=if is_hidden { "Show prim" } else { "Hide prim" }
+                                        aria-pressed=(!is_hidden).to_string()
+                                        on:click=move |_| {
+                                            let mut paths = hidden_prims.get_untracked();
+                                            if !paths.insert(visibility_path.clone()) {
+                                                paths.remove(&visibility_path);
+                                            }
+                                            set_hidden_prims.set(paths);
+                                            visibility_bridge.send(ViewerCommand::SetPrimVisibility {
+                                                path: visibility_path.clone(),
+                                                visible: is_hidden,
+                                            });
+                                        }
+                                    >
+                                        <svg viewBox="0 0 16 10" aria-hidden="true">
+                                            <path d="M1 5c1.7-2.5 4-3.75 7-3.75S13.3 2.5 15 5c-1.7 2.5-4 3.75-7 3.75S2.7 7.5 1 5Z"/>
+                                            <circle cx="8" cy="5" r="1.7"/>
+                                        </svg>
+                                    </button>
+                                </div>
                             }
-                        }).collect_view()}
+                        }).collect_view()
+                        }}
                     </nav>
-                    <div class="panel-foot">
-                        <span><i class="legend mesh-dot"></i>"GEOMETRY"</span>
-                        <span><i class="legend xform-dot"></i>"XFORM"</span>
-                    </div>
                 </aside>
 
                 <section class="viewport-wrap">
@@ -838,11 +1082,8 @@ pub fn App() -> impl IntoView {
                             "RMB/WHEEL DOLLY"
                         </div>
                     </div>
-                    {viewport_canvas(command_rx, event_sender)}
-                    <div class="axis-gizmo" aria-hidden="true">
-                        <span class="axis-y">"Y"</span><span class="axis-x">"X"</span><span class="axis-z">"Z"</span>
-                        <i class="line-y"></i><i class="line-x"></i><i class="line-z"></i>
-                    </div>
+                    {viewport_canvas(command_rx, event_sender, camera_sender)}
+                    {axis_gizmo_view(axis_gizmo)}
                     <div class="viewport-badge"><span></span>"BEVY 0.19 / WEBGL2"</div>
                 </section>
 
@@ -893,6 +1134,7 @@ pub fn App() -> impl IntoView {
 fn init_bevy_app(
     command_rx: BevyMessageReceiver<ViewerCommand>,
     event_sender: BevyMessageSender<ViewerEvent>,
+    camera_sender: BevyMessageSender<AxisGizmoState>,
 ) -> bevy::prelude::App {
     let mut app = bevy::prelude::App::new();
     app.add_plugins(
@@ -912,6 +1154,7 @@ fn init_bevy_app(
     .add_plugins((UsdPlugin, LiveStagePlugin))
     .import_message_from_leptos(command_rx)
     .export_message_to_leptos(event_sender)
+    .export_message_to_leptos(camera_sender)
     .insert_resource(ClearColor(Color::srgb_u8(18, 20, 23)))
     .insert_resource(DisplayPurposes {
         render: true,
@@ -931,7 +1174,7 @@ fn init_bevy_app(
         ),
     )
     .add_systems(PostUpdate, apply_pending_stage)
-    .add_systems(Last, frame_loaded_stage);
+    .add_systems(Last, (frame_loaded_stage, emit_camera_orientation).chain());
 
     let stage = build_showroom_stage();
     app.world_mut().insert_non_send(LiveStage::new(stage));
@@ -1049,6 +1292,7 @@ fn setup_viewport(
             ..default()
         })),
         Transform::from_xyz(0.0, -0.02, 0.0),
+        NotShadowCaster,
     ));
 }
 
@@ -1091,6 +1335,7 @@ fn apply_scene_style(
 
 #[cfg(feature = "hydrate")]
 fn handle_viewer_commands(
+    mut commands: Commands,
     mut messages: MessageReader<ViewerCommand>,
     prims: Res<PrimEntities>,
     transforms: Query<&GlobalTransform>,
@@ -1112,6 +1357,15 @@ fn handle_viewer_commands(
                     && let Ok(transform) = transforms.get(entity)
                 {
                     camera.focus = transform.translation();
+                }
+            }
+            ViewerCommand::SetPrimVisibility { path, visible } => {
+                if let Some(entity) = prims.entity(path) {
+                    commands.entity(entity).insert(if *visible {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    });
                 }
             }
             ViewerCommand::LoadUsd { name, files } => {
@@ -1357,6 +1611,31 @@ fn orbit_camera(
     let rotation = Quat::from_euler(EulerRot::YXZ, orbit.yaw, orbit.pitch, 0.0);
     transform.translation = orbit.focus + rotation * Vec3::new(0.0, 0.0, orbit.radius);
     transform.look_at(orbit.focus, Vec3::Y);
+}
+
+#[cfg(feature = "hydrate")]
+fn emit_camera_orientation(
+    cameras: Query<&Transform, bevy::ecs::query::With<OrbitCamera>>,
+    mut previous: Local<Option<Quat>>,
+    mut orientations: MessageWriter<AxisGizmoState>,
+) {
+    let Ok(transform) = cameras.single() else {
+        return;
+    };
+    let rotation = transform.rotation;
+    if previous.is_some_and(|previous| previous.dot(rotation).abs() > 0.999_999) {
+        return;
+    }
+    *previous = Some(rotation);
+
+    let view_rotation = rotation.inverse();
+    let project = |axis: Vec3| {
+        let axis = view_rotation * axis;
+        [axis.x, -axis.y, axis.z]
+    };
+    orientations.write(AxisGizmoState {
+        axes: [project(Vec3::X), project(Vec3::Y), project(Vec3::Z)],
+    });
 }
 
 #[cfg(feature = "hydrate")]
