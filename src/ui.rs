@@ -1,8 +1,10 @@
 use leptos::prelude::*;
 use leptos_meta::{Meta, Stylesheet, Title};
 
-use crate::bevy_canvas::{CanvasEventSender, CanvasReceiver, ViewerBridge, viewport_canvas};
-use crate::model::{BrowserSceneFiles, StagePrimInfo, ViewerCommand};
+use crate::bevy_canvas::{
+    CameraEventSender, CanvasEventSender, CanvasReceiver, ViewerBridge, viewport_canvas,
+};
+use crate::model::{AxisGizmoState, BrowserSceneFiles, StagePrimInfo, ViewerCommand};
 use crate::usd_loader::{load_dependency_folder, load_selected_file, request_dependency_folder};
 
 #[derive(Clone, Copy)]
@@ -27,6 +29,28 @@ pub(crate) struct UiState {
     pub(crate) set_scene_files: WriteSignal<Option<BrowserSceneFiles>>,
     pub(crate) missing_dependencies: ReadSignal<Vec<String>>,
     pub(crate) set_missing_dependencies: WriteSignal<Vec<String>>,
+    pub(crate) axis_gizmo: ReadSignal<AxisGizmoState>,
+    pub(crate) outliner_filter: ReadSignal<String>,
+    pub(crate) set_outliner_filter: WriteSignal<String>,
+    pub(crate) collapsed_prims: ReadSignal<std::collections::HashSet<String>>,
+    pub(crate) set_collapsed_prims: WriteSignal<std::collections::HashSet<String>>,
+    pub(crate) hidden_prims: ReadSignal<std::collections::HashSet<String>>,
+    pub(crate) set_hidden_prims: WriteSignal<std::collections::HashSet<String>>,
+}
+
+fn prim_path_depth(path: &str) -> usize {
+    path.split('/').filter(|part| !part.is_empty()).count()
+}
+
+fn is_descendant_path(path: &str, ancestor: &str) -> bool {
+    path.strip_prefix(ancestor)
+        .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn matches_prim_filter(prim: &StagePrimInfo, filter: &str) -> bool {
+    prim.name.to_lowercase().contains(filter)
+        || prim.path.to_lowercase().contains(filter)
+        || prim.kind.to_lowercase().contains(filter)
 }
 
 #[component]
@@ -35,6 +59,7 @@ pub(crate) fn ViewerPage(
     bridge: ViewerBridge,
     command_rx: CanvasReceiver,
     event_sender: CanvasEventSender,
+    camera_sender: CameraEventSender,
 ) -> impl IntoView {
     view! {
         <Stylesheet id="leptos" href="/pkg/webtest.css"/>
@@ -49,7 +74,7 @@ pub(crate) fn ViewerPage(
             <DependencyDialog state/>
             <section class="workspace">
                 <ScenePanel state bridge=bridge.clone()/>
-                <ViewportPane command_rx event_sender/>
+                <ViewportPane state command_rx event_sender camera_sender/>
                 <PropertiesPanel state/>
             </section>
             <StatusBar state/>
@@ -217,64 +242,206 @@ fn DependencyDialog(state: UiState) -> impl IntoView {
 fn ScenePanel(state: UiState, bridge: ViewerBridge) -> impl IntoView {
     view! {
         <aside class:open=move || state.left_open.get() class="panel outliner">
-            <div class="panel-heading">
-                <div><span class="eyebrow">"STAGE"</span><h2>"Outliner"</h2></div>
-                <span class="count">
-                    {move || format!("{} PRIMS", state.stage_prims.get().len())}
-                </span>
+            <div class="outliner-titlebar">
+                <span class="scene-caret" aria-hidden="true">"⌄"</span>
+                <span class="scene-folder" aria-hidden="true"></span>
+                <strong>"SCENE"</strong>
             </div>
-            <label class="search">
+            <label class="outliner-search">
                 <span aria-hidden="true">"⌕"</span>
-                <input type="search" placeholder="Filter stage…" aria-label="Filter stage" />
-                <kbd>"/"</kbd>
+                <input
+                    type="search"
+                    placeholder="filter by name / path…"
+                    aria-label="Filter scene"
+                    prop:value=move || state.outliner_filter.get()
+                    on:input=move |event| {
+                        state.set_outliner_filter.set(event_target_value(&event))
+                    }
+                />
             </label>
-            <nav class="tree" aria-label="Stage prims">
+            <nav class="tree" role="tree" aria-label="Stage prims">
                 {move || {
+                    let prims = state.stage_prims.get();
+                    let collapsed = state.collapsed_prims.get();
+                    let hidden = state.hidden_prims.get();
+                    let filter = state.outliner_filter.get().trim().to_lowercase();
+                    let base_depth = prims
+                        .iter()
+                        .map(|prim| prim_path_depth(&prim.path))
+                        .min()
+                        .unwrap_or(1);
                     let select_bridge = bridge.clone();
-                    state
-                        .stage_prims
-                        .get()
-                        .into_iter()
+                    prims
+                        .iter()
+                        .filter(|prim| {
+                            let hidden_by_parent = filter.is_empty()
+                                && collapsed
+                                    .iter()
+                                    .any(|parent| is_descendant_path(&prim.path, parent));
+                            if hidden_by_parent {
+                                return false;
+                            }
+                            filter.is_empty()
+                                || matches_prim_filter(prim, &filter)
+                                || prims.iter().any(|candidate| {
+                                    is_descendant_path(&candidate.path, &prim.path)
+                                        && matches_prim_filter(candidate, &filter)
+                                })
+                        })
+                        .cloned()
                         .map(|prim| {
+                            let has_children = prims
+                                .iter()
+                                .any(|candidate| is_descendant_path(&candidate.path, &prim.path));
+                            let depth = prim_path_depth(&prim.path).saturating_sub(base_depth);
+                            let is_collapsed = collapsed.contains(&prim.path);
+                            let is_hidden = hidden.contains(&prim.path);
                             let prim_bridge = select_bridge.clone();
+                            let visibility_bridge = select_bridge.clone();
                             let selected_path = prim.path.clone();
                             let focus_path = prim.path.clone();
+                            let collapse_path = prim.path.clone();
+                            let visibility_path = prim.path.clone();
                             let click_prim = prim.clone();
                             let icon_class = if prim.kind == "Mesh" {
-                                "prim-icon mesh"
+                                "prim-cube mesh"
                             } else {
-                                "prim-icon xform"
+                                "prim-cube"
                             };
                             view! {
-                                <button
-                                    type="button"
-                                    class="tree-row child-row"
+                                <div
+                                    class="tree-row"
                                     class:selected=move || state.selected.get().path == selected_path
-                                    on:click=move |_| {
-                                        state.set_selected.set(click_prim.clone());
-                                        prim_bridge.send(ViewerCommand::FocusPrim(focus_path.clone()));
-                                    }
+                                    class:muted=is_hidden
+                                    role="treeitem"
+                                    attr:aria-level=(depth + 1).to_string()
+                                    attr:aria-expanded=has_children.then(|| (!is_collapsed).to_string())
+                                    style=format!("--tree-indent: {}px", depth * 13)
                                 >
-                                    <span class="branch-line"></span>
+                                    <button
+                                        type="button"
+                                        class="tree-disclosure"
+                                        class:empty=!has_children
+                                        aria-label=if is_collapsed { "Expand prim" } else { "Collapse prim" }
+                                        on:click=move |_| {
+                                            if has_children {
+                                                let mut paths = state.collapsed_prims.get_untracked();
+                                                if !paths.insert(collapse_path.clone()) {
+                                                    paths.remove(&collapse_path);
+                                                }
+                                                state.set_collapsed_prims.set(paths);
+                                            }
+                                        }
+                                    >
+                                        {if is_collapsed { "›" } else { "⌄" }}
+                                    </button>
                                     <span class=icon_class></span>
-                                    <span>{prim.name}</span>
-                                    <small>{prim.kind}</small>
-                                </button>
+                                    <button
+                                        type="button"
+                                        class="tree-select"
+                                        on:click=move |_| {
+                                            state.set_selected.set(click_prim.clone());
+                                            prim_bridge.send(ViewerCommand::FocusPrim(focus_path.clone()));
+                                        }
+                                    >
+                                        <span>{prim.name}</span>
+                                        <small>{prim.kind}</small>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="tree-visibility"
+                                        class:hidden=is_hidden
+                                        aria-label=if is_hidden { "Show prim" } else { "Hide prim" }
+                                        aria-pressed=(!is_hidden).to_string()
+                                        on:click=move |_| {
+                                            let mut paths = state.hidden_prims.get_untracked();
+                                            if !paths.insert(visibility_path.clone()) {
+                                                paths.remove(&visibility_path);
+                                            }
+                                            state.set_hidden_prims.set(paths);
+                                            visibility_bridge.send(ViewerCommand::SetPrimVisibility {
+                                                path: visibility_path.clone(),
+                                                visible: is_hidden,
+                                            });
+                                        }
+                                    >
+                                        <svg viewBox="0 0 16 10" aria-hidden="true">
+                                            <path d="M1 5c1.7-2.5 4-3.75 7-3.75S13.3 2.5 15 5c-1.7 2.5-4 3.75-7 3.75S2.7 7.5 1 5Z"/>
+                                            <circle cx="8" cy="5" r="1.7"/>
+                                        </svg>
+                                    </button>
+                                </div>
                             }
                         })
                         .collect_view()
                 }}
             </nav>
-            <div class="panel-foot">
-                <span><i class="legend mesh-dot"></i>"GEOMETRY"</span>
-                <span><i class="legend xform-dot"></i>"XFORM"</span>
-            </div>
         </aside>
     }
 }
 
+fn axis_gizmo_view(axis_gizmo: ReadSignal<AxisGizmoState>) -> impl IntoView {
+    let coordinate = move |axis: usize, component: usize, radius: f32| {
+        32.0 + axis_gizmo.get().axes[axis][component] * radius
+    };
+    let opacity = move |axis: usize| {
+        let depth = axis_gizmo.get().axes[axis][2];
+        0.48 + (depth + 1.0) * 0.24
+    };
+
+    view! {
+        <svg class="axis-gizmo" viewBox="0 0 64 64" aria-hidden="true">
+            <line
+                class="axis-line axis-x"
+                x1="32" y1="32"
+                x2=move || coordinate(0, 0, 22.0)
+                y2=move || coordinate(0, 1, 22.0)
+                opacity=move || opacity(0)
+            />
+            <line
+                class="axis-line axis-y"
+                x1="32" y1="32"
+                x2=move || coordinate(1, 0, 22.0)
+                y2=move || coordinate(1, 1, 22.0)
+                opacity=move || opacity(1)
+            />
+            <line
+                class="axis-line axis-z"
+                x1="32" y1="32"
+                x2=move || coordinate(2, 0, 22.0)
+                y2=move || coordinate(2, 1, 22.0)
+                opacity=move || opacity(2)
+            />
+            <circle class="axis-origin" cx="32" cy="32" r="2"/>
+            <text
+                class="axis-label axis-x"
+                x=move || coordinate(0, 0, 27.0)
+                y=move || coordinate(0, 1, 27.0)
+                opacity=move || opacity(0)
+            >"X"</text>
+            <text
+                class="axis-label axis-y"
+                x=move || coordinate(1, 0, 27.0)
+                y=move || coordinate(1, 1, 27.0)
+                opacity=move || opacity(1)
+            >"Y"</text>
+            <text
+                class="axis-label axis-z"
+                x=move || coordinate(2, 0, 27.0)
+                y=move || coordinate(2, 1, 27.0)
+                opacity=move || opacity(2)
+            >"Z"</text>
+        </svg>
+    }
+}
+
 #[component]
-fn ViewportPane(command_rx: CanvasReceiver, event_sender: CanvasEventSender) -> impl IntoView {
+fn ViewportPane(
+    state: UiState,
+    command_rx: CanvasReceiver,
+    event_sender: CanvasEventSender,
+    camera_sender: CameraEventSender,
+) -> impl IntoView {
     view! {
         <section class="viewport-wrap">
             <div class="viewport-toolbar">
@@ -287,13 +454,8 @@ fn ViewportPane(command_rx: CanvasReceiver, event_sender: CanvasEventSender) -> 
                     "RMB/WHEEL DOLLY"
                 </div>
             </div>
-            {viewport_canvas(command_rx, event_sender)}
-            <div class="axis-gizmo" aria-hidden="true">
-                <span class="axis-y">"Y"</span>
-                <span class="axis-x">"X"</span>
-                <span class="axis-z">"Z"</span>
-                <i class="line-y"></i><i class="line-x"></i><i class="line-z"></i>
-            </div>
+            {viewport_canvas(command_rx, event_sender, camera_sender)}
+            {axis_gizmo_view(state.axis_gizmo)}
             <div class="viewport-badge"><span></span>"BEVY 0.19 / WEBGL2"</div>
         </section>
     }

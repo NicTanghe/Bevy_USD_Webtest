@@ -1,11 +1,13 @@
 use leptos::prelude::*;
 
-use crate::model::{StagePrimInfo, ViewerCommand};
+use crate::model::{AxisGizmoState, StagePrimInfo, ViewerCommand};
 
 #[cfg(feature = "hydrate")]
 use crate::model::{FrameStage, PendingStage, ViewerEvent};
 #[cfg(feature = "hydrate")]
 use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
+#[cfg(feature = "hydrate")]
+use bevy::light::NotShadowCaster;
 #[cfg(feature = "hydrate")]
 use bevy::prelude::*;
 #[cfg(feature = "hydrate")]
@@ -60,6 +62,12 @@ pub(crate) type StageEventReceiver = LeptosMessageReceiver<ViewerEvent>;
 #[cfg(feature = "hydrate")]
 pub(crate) type CanvasEventSender = BevyMessageSender<ViewerEvent>;
 
+#[cfg(feature = "hydrate")]
+pub(crate) type CameraEventReceiver = LeptosMessageReceiver<AxisGizmoState>;
+
+#[cfg(feature = "hydrate")]
+pub(crate) type CameraEventSender = BevyMessageSender<AxisGizmoState>;
+
 #[cfg(not(feature = "hydrate"))]
 pub(crate) struct CanvasReceiver;
 
@@ -69,16 +77,32 @@ pub(crate) struct StageEventReceiver;
 #[cfg(not(feature = "hydrate"))]
 pub(crate) struct CanvasEventSender;
 
+#[cfg(not(feature = "hydrate"))]
+pub(crate) struct CameraEventReceiver;
+
+#[cfg(not(feature = "hydrate"))]
+pub(crate) struct CameraEventSender;
+
 #[cfg(feature = "hydrate")]
 pub(crate) fn viewer_bridge() -> (
     ViewerBridge,
     CanvasReceiver,
     StageEventReceiver,
     CanvasEventSender,
+    CameraEventReceiver,
+    CameraEventSender,
 ) {
     let (sender, receiver) = message_l2b::<ViewerCommand>();
     let (event_receiver, event_sender) = message_b2l::<ViewerEvent>();
-    (ViewerBridge(sender), receiver, event_receiver, event_sender)
+    let (camera_receiver, camera_sender) = message_b2l::<AxisGizmoState>();
+    (
+        ViewerBridge(sender),
+        receiver,
+        event_receiver,
+        event_sender,
+        camera_receiver,
+        camera_sender,
+    )
 }
 
 #[cfg(not(feature = "hydrate"))]
@@ -87,12 +111,16 @@ pub(crate) fn viewer_bridge() -> (
     CanvasReceiver,
     StageEventReceiver,
     CanvasEventSender,
+    CameraEventReceiver,
+    CameraEventSender,
 ) {
     (
         ViewerBridge,
         CanvasReceiver,
         StageEventReceiver,
         CanvasEventSender,
+        CameraEventReceiver,
+        CameraEventSender,
     )
 }
 
@@ -112,6 +140,9 @@ impl ViewerBridge {
                 let _ = enabled;
             }
             ViewerCommand::FocusPrim(path) => drop(path),
+            ViewerCommand::SetPrimVisibility { path, visible } => {
+                drop((path, visible));
+            }
         }
     }
 }
@@ -120,14 +151,16 @@ impl ViewerBridge {
 pub(crate) fn viewport_canvas(
     receiver: CanvasReceiver,
     event_sender: CanvasEventSender,
+    camera_sender: CameraEventSender,
 ) -> impl IntoView {
-    view! { <BevyCanvas init=move || init_bevy_app(receiver, event_sender) canvas_id=CANVAS_ID /> }
+    view! { <BevyCanvas init=move || init_bevy_app(receiver, event_sender, camera_sender) canvas_id=CANVAS_ID /> }
 }
 
 #[cfg(not(feature = "hydrate"))]
 pub(crate) fn viewport_canvas(
     _receiver: CanvasReceiver,
     _event_sender: CanvasEventSender,
+    _camera_sender: CameraEventSender,
 ) -> impl IntoView {
     view! { <canvas id=CANVAS_ID></canvas> }
 }
@@ -190,9 +223,29 @@ pub(crate) fn install_stage_feedback(
 }
 
 #[cfg(feature = "hydrate")]
+pub(crate) fn install_camera_feedback(
+    receiver: CameraEventReceiver,
+    set_axis_gizmo: WriteSignal<AxisGizmoState>,
+) {
+    Effect::new(move |_| {
+        if let Some(orientation) = receiver.get() {
+            set_axis_gizmo.set(orientation);
+        }
+    });
+}
+
+#[cfg(not(feature = "hydrate"))]
+pub(crate) fn install_camera_feedback(
+    _receiver: CameraEventReceiver,
+    _set_axis_gizmo: WriteSignal<AxisGizmoState>,
+) {
+}
+
+#[cfg(feature = "hydrate")]
 fn init_bevy_app(
     command_rx: BevyMessageReceiver<ViewerCommand>,
     event_sender: BevyMessageSender<ViewerEvent>,
+    camera_sender: BevyMessageSender<AxisGizmoState>,
 ) -> bevy::prelude::App {
     let mut app = bevy::prelude::App::new();
     app.add_plugins(
@@ -212,6 +265,7 @@ fn init_bevy_app(
     .add_plugins((UsdPlugin, LiveStagePlugin))
     .import_message_from_leptos(command_rx)
     .export_message_to_leptos(event_sender)
+    .export_message_to_leptos(camera_sender)
     .insert_resource(ClearColor(Color::srgb_u8(18, 20, 23)))
     .insert_resource(DisplayPurposes {
         render: true,
@@ -231,7 +285,7 @@ fn init_bevy_app(
         ),
     )
     .add_systems(PostUpdate, crate::usd_loader::apply_pending_stage)
-    .add_systems(Last, frame_loaded_stage);
+    .add_systems(Last, (frame_loaded_stage, emit_camera_orientation).chain());
 
     let stage = build_showroom_stage();
     app.world_mut().insert_non_send(LiveStage::new(stage));
@@ -349,6 +403,7 @@ fn setup_viewport(
             ..default()
         })),
         Transform::from_xyz(0.0, -0.02, 0.0),
+        NotShadowCaster,
     ));
 }
 
@@ -391,6 +446,7 @@ fn apply_scene_style(
 
 #[cfg(feature = "hydrate")]
 fn handle_viewer_commands(
+    mut commands: Commands,
     mut messages: MessageReader<ViewerCommand>,
     prims: Res<PrimEntities>,
     transforms: Query<&GlobalTransform>,
@@ -412,6 +468,15 @@ fn handle_viewer_commands(
                     && let Ok(transform) = transforms.get(entity)
                 {
                     camera.focus = transform.translation();
+                }
+            }
+            ViewerCommand::SetPrimVisibility { path, visible } => {
+                if let Some(entity) = prims.entity(path) {
+                    commands.entity(entity).insert(if *visible {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    });
                 }
             }
             ViewerCommand::LoadUsd { name, files } => {
@@ -546,6 +611,31 @@ fn orbit_camera(
     let rotation = Quat::from_euler(EulerRot::YXZ, orbit.yaw, orbit.pitch, 0.0);
     transform.translation = orbit.focus + rotation * Vec3::new(0.0, 0.0, orbit.radius);
     transform.look_at(orbit.focus, Vec3::Y);
+}
+
+#[cfg(feature = "hydrate")]
+fn emit_camera_orientation(
+    cameras: Query<&Transform, bevy::ecs::query::With<OrbitCamera>>,
+    mut previous: Local<Option<Quat>>,
+    mut orientations: MessageWriter<AxisGizmoState>,
+) {
+    let Ok(transform) = cameras.single() else {
+        return;
+    };
+    let rotation = transform.rotation;
+    if previous.is_some_and(|previous| previous.dot(rotation).abs() > 0.999_999) {
+        return;
+    }
+    *previous = Some(rotation);
+
+    let view_rotation = rotation.inverse();
+    let project = |axis: Vec3| {
+        let axis = view_rotation * axis;
+        [axis.x, -axis.y, axis.z]
+    };
+    orientations.write(AxisGizmoState {
+        axes: [project(Vec3::X), project(Vec3::Y), project(Vec3::Z)],
+    });
 }
 
 #[cfg(feature = "hydrate")]

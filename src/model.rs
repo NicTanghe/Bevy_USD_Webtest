@@ -7,6 +7,10 @@ pub(crate) enum ViewerCommand {
     ResetCamera,
     SetAutoOrbit(bool),
     FocusPrim(String),
+    SetPrimVisibility {
+        path: String,
+        visible: bool,
+    },
     #[cfg(feature = "hydrate")]
     LoadUsd {
         name: String,
@@ -39,6 +43,20 @@ pub(crate) struct StagePrimInfo {
     pub(crate) kind: String,
     pub(crate) position: String,
     pub(crate) color: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "hydrate", derive(Message))]
+pub(crate) struct AxisGizmoState {
+    pub(crate) axes: [[f32; 3]; 3],
+}
+
+impl Default for AxisGizmoState {
+    fn default() -> Self {
+        Self {
+            axes: [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]],
+        }
+    }
 }
 
 #[cfg(feature = "hydrate")]
