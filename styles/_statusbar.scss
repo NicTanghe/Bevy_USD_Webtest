@@ -1,0 +1,26 @@
+@use 'tokens' as *;
+
+.statusbar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  z-index: 20;
+  padding: 0 12px;
+  border-top: 1px solid var(--line);
+  background: #141719;
+  color: #656b6d;
+  @include mono-label(7px, 500, 0.1em);
+
+  > div {
+    @include flex-center;
+    gap: 7px;
+
+    &:nth-child(2) {
+      justify-content: center;
+    }
+  }
+
+  .runtime-label {
+    justify-content: flex-end;
+  }
+}

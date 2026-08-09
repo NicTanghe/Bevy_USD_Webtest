@@ -1,0 +1,40 @@
+@use 'tokens' as *;
+
+.workspace {
+  display: grid;
+  grid-template-columns: $outliner-width minmax(0, 1fr) $inspector-width;
+  min-height: 0;
+}
+
+.panel {
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+}
+
+.inspector {
+  border-left: 1px solid var(--line);
+}
+
+.panel-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  min-height: 82px;
+  padding: 17px 17px 14px 20px;
+  border-bottom: 1px solid var(--line-soft);
+
+  h2 {
+    margin: 5px 0 0;
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+}
+
+.eyebrow {
+  color: var(--faint);
+  @include mono-label(8px, 500, 0.14em);
+}

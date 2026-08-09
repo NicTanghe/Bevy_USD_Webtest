@@ -1,0 +1,80 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Manrope:wght@400;500;600;700&display=swap');
+
+$color-ink: #f1f2ee;
+$color-faint: #5e6467;
+$color-line: #303437;
+$color-line-soft: #262a2d;
+$color-panel: #181b1e;
+$color-void: #111316;
+$color-accent: #e8643f;
+$color-accent-hot: #f08a55;
+
+$font-mono: 'DM Mono', ui-monospace, monospace;
+$font-sans: 'Manrope', system-ui, sans-serif;
+
+$header-height: 58px;
+$statusbar-height: 28px;
+$mobile-header-height: 52px;
+$mobile-statusbar-height: 26px;
+$outliner-width: 264px;
+$inspector-width: 292px;
+$tablet-breakpoint: 980px;
+$mobile-breakpoint: 700px;
+$transition-fast: 0.18s;
+$transition-drawer: 0.22s ease;
+
+:root {
+  color-scheme: dark;
+  --ink: #{$color-ink};
+  --faint: #{$color-faint};
+  --line: #{$color-line};
+  --line-soft: #{$color-line-soft};
+  --panel: #{$color-panel};
+  --void: #{$color-void};
+  --accent: #{$color-accent};
+  --accent-hot: #{$color-accent-hot};
+  --mono: #{$font-mono};
+  --sans: #{$font-sans};
+}
+
+@mixin flex-center($justify: null) {
+  display: flex;
+  align-items: center;
+
+  @if $justify {
+    justify-content: $justify;
+  }
+}
+
+@mixin mono-label($size, $weight: 500, $tracking: null, $line-height: 1) {
+  font-family: var(--mono);
+  font-size: $size;
+  font-weight: $weight;
+  line-height: $line-height;
+
+  @if $tracking {
+    letter-spacing: $tracking;
+  }
+}
+
+@mixin control-reset {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+@mixin truncate {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@mixin circle($size, $color) {
+  display: inline-block;
+  width: $size;
+  height: $size;
+  border-radius: 50%;
+  background: $color;
+}

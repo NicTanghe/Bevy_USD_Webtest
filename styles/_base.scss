@@ -1,0 +1,41 @@
+@use 'tokens' as *;
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--void);
+}
+
+body {
+  color: var(--ink);
+  font-family: var(--sans);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-rows: $header-height minmax(0, 1fr) $statusbar-height;
+  width: 100vw;
+  height: 100dvh;
+  background: var(--void);
+}
+
+.status-dot {
+  @include circle(6px, #78a879);
+  box-shadow: 0 0 8px rgba(120, 168, 121, 0.45);
+}

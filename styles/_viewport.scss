@@ -1,0 +1,107 @@
+@use 'tokens' as *;
+
+.viewport-wrap {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #121417;
+}
+
+#usd_viewport {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  outline: 0;
+  touch-action: none;
+}
+
+.viewport-toolbar {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 5;
+  @include flex-center(space-between);
+  height: 36px;
+  padding: 0 13px;
+  background: linear-gradient(180deg, rgba(17, 19, 22, 0.82), rgba(17, 19, 22, 0.06));
+  pointer-events: none;
+}
+
+.view-mode,
+.viewport-hint {
+  @include flex-center;
+  gap: 9px;
+  color: #8c9293;
+  @include mono-label(8px, 500, 0.1em);
+}
+
+.view-mode i {
+  width: 1px;
+  height: 11px;
+  background: #44494b;
+}
+
+.viewport-hint {
+  color: #5f6668;
+
+  span {
+    color: #3c4244;
+  }
+}
+
+.viewport-badge {
+  position: absolute;
+  right: 13px;
+  bottom: 12px;
+  color: #687072;
+  pointer-events: none;
+  @include mono-label(7px, 500, 0.1em);
+
+  span {
+    @include circle(5px, #7ca27d);
+    margin-right: 7px;
+  }
+}
+
+.axis-gizmo {
+  position: absolute;
+  bottom: 18px;
+  left: 17px;
+  width: 64px;
+  height: 64px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.axis-line {
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.axis-label {
+  font: 600 8px/1 var(--mono);
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.axis-x {
+  fill: #d7665c;
+  stroke: #d7665c;
+}
+
+.axis-y {
+  fill: #6fad79;
+  stroke: #6fad79;
+}
+
+.axis-z {
+  fill: #5d91c7;
+  stroke: #5d91c7;
+}
+
+.axis-origin {
+  fill: #a9afb0;
+  stroke: #181b1e;
+  stroke-width: 1;
+}

@@ -1,0 +1,140 @@
+@use 'tokens' as *;
+
+.topbar {
+  display: grid;
+  grid-template-columns: $outliner-width minmax(180px, 1fr) auto;
+  align-items: stretch;
+  z-index: 20;
+  border-bottom: 1px solid var(--line);
+  background: #16191b;
+}
+
+.brand,
+.stage-title,
+.top-actions {
+  @include flex-center;
+}
+
+.brand {
+  gap: 9px;
+  padding: 0 18px;
+  border-right: 1px solid var(--line);
+
+  &-mark {
+    position: relative;
+    display: block;
+    width: 24px;
+    height: 24px;
+    transform: rotate(-8deg);
+
+    i {
+      position: absolute;
+      display: block;
+      width: 17px;
+      height: 5px;
+      background: var(--accent);
+      transform: skewX(-24deg);
+
+      &:nth-child(1) {
+        top: 2px;
+        left: 2px;
+      }
+
+      &:nth-child(2) {
+        top: 9px;
+        left: 5px;
+        width: 14px;
+      }
+
+      &:nth-child(3) {
+        top: 16px;
+        left: 8px;
+        width: 11px;
+      }
+    }
+  }
+
+  &-name {
+    font: 700 15px/1 var(--sans);
+    letter-spacing: 0.08em;
+  }
+
+  &-suffix {
+    @include mono-label(11px, 400, 0.08em);
+    color: var(--faint);
+  }
+}
+
+.stage-title {
+  justify-content: center;
+  gap: 9px;
+  @include mono-label(12px, 500, 0.03em);
+
+  small {
+    padding-left: 9px;
+    border-left: 1px solid var(--line);
+    color: var(--faint);
+    @include mono-label(9px, 500, 0.12em);
+  }
+}
+
+.top-actions {
+  justify-content: flex-end;
+}
+
+.tool-button,
+.icon-button {
+  height: 100%;
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: #aeb2b2;
+  cursor: pointer;
+  transition: background $transition-fast, color $transition-fast;
+  @include mono-label(9px, 500, 0.09em);
+
+  &:hover {
+    background: #212529;
+    color: var(--ink);
+  }
+}
+
+.tool-button {
+  min-width: 106px;
+  padding: 0 15px;
+
+  &.active {
+    background: #212529;
+    box-shadow: inset 0 -2px var(--accent);
+    color: var(--ink);
+  }
+
+  span {
+    margin-right: 6px;
+    color: var(--accent-hot);
+    font-size: 13px;
+  }
+}
+
+.file-button {
+  position: relative;
+  @include flex-center(center);
+  cursor: pointer;
+
+  input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+
+.dependency-folder-input,
+.mobile-only {
+  display: none;
+}
+
+.icon-button {
+  padding: 0 13px;
+}

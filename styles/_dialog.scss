@@ -1,0 +1,91 @@
+@use 'tokens' as *;
+
+.dependency-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(6, 8, 10, 0.76);
+  backdrop-filter: blur(5px);
+}
+
+.dependency-modal {
+  width: min(540px, 100%);
+  border: 1px solid #3b4043;
+  background: #191c1f;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+
+  &-heading {
+    padding: 22px 24px 18px;
+    border-bottom: 1px solid var(--line-soft);
+
+    h2 {
+      margin: 7px 0 0;
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+  }
+
+  > p {
+    margin: 0;
+    padding: 18px 24px 12px;
+    color: #aeb2b2;
+    font-size: 12px;
+    line-height: 1.65;
+  }
+
+  > .dependency-note {
+    padding-top: 12px;
+    color: #686e70;
+    @include mono-label(9px, 400, null, 1.6);
+  }
+}
+
+.dependency-list {
+  max-height: 190px;
+  margin: 0 24px;
+  padding: 10px 12px 10px 30px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: #121518;
+  color: var(--accent-hot);
+  @include mono-label(10px, 400, null, 1.7);
+}
+
+.dependency-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  padding: 8px 24px 22px;
+
+  button {
+    min-height: 34px;
+    padding: 0 14px;
+    border: 1px solid var(--line);
+    cursor: pointer;
+    @include mono-label(8px, 500, 0.1em);
+  }
+}
+
+.dependency-secondary {
+  background: transparent;
+  color: #7e8486;
+
+  &:hover {
+    background: #222629;
+    color: var(--ink);
+  }
+}
+
+.dependency-primary {
+  border-color: var(--accent) !important;
+  background: var(--accent);
+  color: #fff;
+
+  &:hover {
+    background: var(--accent-hot);
+  }
+}
