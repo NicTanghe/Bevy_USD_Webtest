@@ -421,12 +421,20 @@ fn apply_scene_style(
 ) {
     for (entity, prim) in &query {
         let color = match prim.path.as_str() {
-            "/World/Anchor" => Color::srgb_u8(206, 88, 53),
-            "/World/Core" => Color::srgb_u8(237, 159, 72),
-            "/World/Tower" => Color::srgb_u8(193, 200, 202),
-            "/World/Link" => Color::srgb_u8(93, 111, 121),
-            "/World/Marker" => Color::srgb_u8(43, 48, 53),
-            _ => Color::srgb_u8(112, 124, 130),
+            "/World/Anchor" => Some(Color::srgb_u8(206, 88, 53)),
+            "/World/Core" => Some(Color::srgb_u8(237, 159, 72)),
+            "/World/Tower" => Some(Color::srgb_u8(193, 200, 202)),
+            "/World/Link" => Some(Color::srgb_u8(93, 111, 121)),
+            "/World/Marker" => Some(Color::srgb_u8(43, 48, 53)),
+            "/World/Deck" => Some(Color::srgb_u8(112, 124, 130)),
+            _ => None,
+        };
+        let Some(color) = color else {
+            // Imported stages are styled by usd_bevy's material routes. Do not
+            // replace a bound UsdPreviewSurface/MaterialX material with the
+            // showroom fallback.
+            commands.entity(entity).insert(SceneStyled);
+            continue;
         };
         let material = materials.add(StandardMaterial {
             base_color: color,

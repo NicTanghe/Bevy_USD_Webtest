@@ -16,7 +16,7 @@ leptos_axum = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 wasm-bindgen = { version = "0.2.106", optional = true }
 
-bevy = { version = "0.19", optional = true, default-features = false, features = [
+bevy = { git = "https://github.com/bevyengine/bevy", rev = "7107093556e4069db8399760ba5151b719107c71", optional = true, default-features = false, features = [
     "std",
     "async_executor",
     "bevy_asset",
@@ -48,6 +48,12 @@ usd_bevy = { path = "../bevy_openusd/crates/usd_bevy", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", features = ["Document", "Element", "FileList", "HtmlElement", "HtmlInputElement", "Window"], optional = true }
 zip = { version = "8.6", default-features = false, optional = true }
+
+# leptos-bevy-canvas 0.6 requires a package named Bevy 0.19. Its API is
+# compatible with the pinned Bevy revision used by usd_bevy, so route that
+# facade through the same source to keep all ECS/render types identical.
+[patch.crates-io]
+bevy = { path = "crates/bevy_019_compat" }
 
 [features]
 hydrate = [

@@ -15,6 +15,7 @@ use openusd::usd::Stage;
 use usd_bevy::live::{LiveStage, PrimEntities};
 
 #[cfg(feature = "hydrate")]
+#[derive(Clone)]
 struct BrowserFileResolver {
     files: std::sync::Arc<Vec<BrowserFile>>,
 }
@@ -51,6 +52,28 @@ impl BrowserFileResolver {
             .filter(|file| std::path::Path::new(&file.path).file_name() == Some(name));
         let file = matches.next()?;
         matches.next().is_none().then_some(file)
+    }
+
+    fn asset_bytes(&self, path: &str) -> Result<Vec<u8>, String> {
+        if let Some((package, inner)) = openusd::ar::split_package_relative_path_outer(path) {
+            use std::io::Read;
+
+            let file = self
+                .file(&package)
+                .ok_or_else(|| format!("package is not available in the browser: {package}"))?;
+            let cursor = std::io::Cursor::new((*file.bytes).clone());
+            let mut archive = zip::ZipArchive::new(cursor).map_err(|error| error.to_string())?;
+            let mut entry = archive.by_name(&inner).map_err(|error| error.to_string())?;
+            let mut bytes = Vec::new();
+            entry
+                .read_to_end(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            return Ok(bytes);
+        }
+
+        self.file(path)
+            .map(|file| (*file.bytes).clone())
+            .ok_or_else(|| format!("asset is not available in the browser: {path}"))
     }
 }
 
@@ -139,30 +162,10 @@ impl openusd::ar::Resolver for BrowserFileResolver {
         resolved_path: &openusd::ar::ResolvedPath,
     ) -> std::io::Result<Box<dyn openusd::ar::Asset>> {
         let resolved = resolved_path.to_string();
-        if let Some((package, inner)) = openusd::ar::split_package_relative_path_outer(&resolved) {
-            use std::io::Read;
-
-            let file = self.file(&package).ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("package is not available in the browser: {package}"),
-                )
-            })?;
-            let cursor = std::io::Cursor::new((*file.bytes).clone());
-            let mut archive = zip::ZipArchive::new(cursor).map_err(std::io::Error::other)?;
-            let mut entry = archive.by_name(&inner).map_err(std::io::Error::other)?;
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes)?;
-            return Ok(Box::new(std::io::Cursor::new(bytes)));
-        }
-
-        let file = self.file(&resolved).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("asset is not available in the browser: {resolved_path}"),
-            )
-        })?;
-        Ok(Box::new(std::io::Cursor::new((*file.bytes).clone())))
+        let bytes = self
+            .asset_bytes(&resolved)
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::NotFound, message))?;
+        Ok(Box::new(std::io::Cursor::new(bytes)))
     }
 
     fn identity(&self) -> String {
@@ -357,6 +360,10 @@ pub(crate) fn apply_pending_stage(world: &mut World) {
 
     let selected_file_count = files.len();
     let resolver = BrowserFileResolver { files };
+    let materialx_resolver = resolver.clone();
+    world.insert_resource(usd_bevy::materialx::asset::MaterialXAssetReader::new(
+        move |path| materialx_resolver.asset_bytes(&path.to_string_lossy()),
+    ));
     let stage = match Stage::builder().resolver(resolver).open(&name) {
         Ok(stage) => stage,
         Err(error) => {
