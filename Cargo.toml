@@ -44,7 +44,7 @@ gloo-file = { version = "0.3", features = ["futures"], optional = true }
 js-sys = { version = "0.3", optional = true }
 leptos-bevy-canvas = { version = "0.6", optional = true }
 openusd = { git = "https://github.com/mxpv/openusd", features = ["geom", "shade"], optional = true }
-usd_bevy = { path = "../bevy_openusd/crates/usd_bevy", optional = true }
+usd_bevy = { path = "../Hamerons_bevy_openusd/crates/usd_bevy", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", features = ["Document", "Element", "FileList", "HtmlElement", "HtmlInputElement", "Window"], optional = true }
 zip = { version = "8.6", default-features = false, optional = true }
